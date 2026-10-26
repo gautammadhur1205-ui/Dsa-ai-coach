@@ -1,24 +1,40 @@
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const executionRoutes =require('./executionRoutes');
 
 const app = express();
-app.use(express.json());
-app.use(cors());
 
-// Test route
+app.use(cors({
+  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json());
+
+const authRoutes = require('./models/authroutes');
+const problemRoutes = require('./models/problemroutes');
+
+
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'Phase 1 & 2 Setup Completed' });
+  res.status(200).json({ status: 'Phase 3 Backend Running Smoothly' });
 });
 
-// Non-blocking connection (MongoDB na chalne par bhi server crash nahi hoga)
-mongoose.connect('mongodb://127.0.0.1:27017/ai_prep_db', {
-  serverSelectionTimeoutMS: 1500
-})
-.then(() => console.log('Database connected successfully'))
-.catch(() => console.log('MongoDB locally run nahi ho raha, lekin server running hai'));
+app.use('/api/auth', authRoutes);
+app.use('/api/problems', problemRoutes);
+app.use('/api', executionRoutes);
 
-const PORT = 5000;
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/ai_prep_db';
+
+// Yahan `err.message` daal diya hai taaki asali error dikhe
+mongoose.connect(MONGO_URI)
+.then(() => console.log('✅ Database connected successfully'))
+.catch((err) => console.log('❌ MongoDB Connection Error Details:', err.message));
+
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
