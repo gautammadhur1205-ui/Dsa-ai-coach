@@ -1,48 +1,91 @@
 const express = require('express');
 const router = express.Router();
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { exec } = require('child_process');
+const Problem = require('./models/Problem');
+const { askGemini } = require('./geminihelper');
 
-router.post('/execute', (req, res) => {
-  const { code, input } = req.body;
+router.post('/execute', async (req, res) => {
+  const { code, problemId } = req.body;
+  if (!code) return res.status(400).json({ success: false, error: 'No code provided' });
 
-  const fileName = 'Solution.java';
-  const filePath = path.join(__dirname, fileName);
-  const classPath = path.join(__dirname, 'Solution.class');
+  // Har request ka apna temp folder -> do users ek saath ho to clash nahi
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-'));
+  const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
 
   try {
-    // User ka code temporary file mein save karein
-    fs.writeFileSync(filePath, code);
+    let problem = null;
+    if (problemId) {
+      try { problem = await Problem.findById(problemId); } catch (_) { /* invalid id */ }
+    }
 
-    // Local machine par javac aur java command se run karein
-    exec(`javac "${filePath}" && java -cp "${__dirname}" Solution`, { timeout: 5000 }, (error, stdout, stderr) => {
-      
-      // Cleanup files
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      if (fs.existsSync(classPath)) fs.unlinkSync(classPath);
+    let executableCode = code;
+    let entryClass = /class\s+Main\b/.test(code) ? 'Main' : 'Solution';
 
-      if (error) {
-        return res.json({
-          success: true,
-          output: '',
-          stderr: stderr || error.message
-        });
+    if (!code.includes('public static void main')) {
+      entryClass = 'Main';
+
+      // Default runner (AI fail ho to)
+      let runner = `
+class Main {
+    public static void main(String[] args) {
+        System.out.println("Code compiled and ran successfully ✅");
+        System.out.println("(No test runner available, AI was unreachable.)");
+    }
+}`;
+
+      try {
+        // Agar problem mein saved testCases hain to AI ko wahi do (sahi expected output)
+        const savedTests = problem && problem.testCases && problem.testCases.length
+          ? `Use exactly these test cases: ${JSON.stringify(problem.testCases.map(t => ({ input: t.input, output: t.output })))}`
+          : 'Create 2 simple test cases yourself.';
+
+        const aiText = await askGemini(
+          `You are a Java test runner generator.
+Problem: "${problem ? problem.title : 'DSA Problem'}"
+Description: "${problem ? problem.description : ''}"
+
+User's code:
+${code}
+
+Write a NON-public Java class named 'Main' with 'public static void main(String[] args)' that calls the user's 'Solution' class method.
+${savedTests}
+For each test print: Test N: input, expected, actual, PASSED or FAILED.
+Do NOT include imports inside Main (use fully qualified names like java.util.Arrays).
+Return ONLY raw Java code for class Main, no markdown.`,
+          { json: false, temperature: 0.2 }
+        );
+        if (aiText.includes('class Main')) runner = aiText;
+      } catch (e) {
+        console.error('EXECUTE: using default runner:', e.message);
       }
 
-      res.json({
-        success: true,
-        output: stdout,
-        stderr: stderr
-      });
-    });
+      executableCode = code + '\n\n' + runner;
+    }
 
+    fs.writeFileSync(path.join(dir, 'Solution.java'), executableCode);
+
+    exec(
+      `javac Solution.java && java ${entryClass}`,
+      { cwd: dir, timeout: 8000 },
+      (error, stdout, stderr) => {
+        cleanup();
+        if (error) {
+          return res.json({
+            success: true,
+            output: stdout ? stdout.trim() : '',
+            stderr: error.killed ? 'Time Limit Exceeded ⏱️' : (stderr || error.message)
+          });
+        }
+        res.json({ success: true, output: stdout.trim(), stderr });
+      }
+    );
   } catch (err) {
-    console.error("Execution error:", err);
-    res.status(500).json({ 
-      success: false, 
-      error: "Server internal execution failed." 
-    });
+    cleanup();
+    console.error('EXECUTE error:', err);
+    res.status(500).json({ success: false, error: 'Server internal execution failed.' });
   }
 });
 
